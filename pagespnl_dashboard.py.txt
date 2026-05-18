@@ -1,0 +1,173 @@
+import streamlit as st
+import pandas as pd
+import plotly.graph_objects as go
+import plotly.express as px
+from datetime import datetime, timedelta
+
+st.set_page_config(page_title="PnL Dashboard", layout="wide")
+
+st.title("💰 Profit & Loss Dashboard")
+st.caption("Real-time trading performance metrics")
+
+# Initialize PnL tracking if not exists
+if 'pnl_history' not in st.session_state:
+    st.session_state.pnl_history = []
+if 'trades' not in st.session_state:
+    st.session_state.trades = []
+if 'cumulative_pnl' not in st.session_state:
+    st.session_state.cumulative_pnl = 0.0
+
+# Sidebar filters
+with st.sidebar:
+    st.header("📊 PnL Controls")
+    bet_size = st.number_input("Bet Size ($)", min_value=1, max_value=10000, value=100, step=10)
+    st.caption("Based on prediction confidence")
+
+# Function to simulate trade (will integrate with real predictions later)
+def add_trade(outcome_predicted, outcome_actual, confidence, bet_size_usd):
+    if confidence < 0.6:
+        # Skip low confidence
+        pnl = 0
+        trade_result = "SKIPPED"
+    elif outcome_predicted == outcome_actual:
+        # Win
+        if outcome_actual == "TIE":
+            pnl = bet_size_usd * 2.5  # Ties pay higher
+        else:
+            pnl = bet_size_usd * 0.95  # Standard win (after edge)
+        trade_result = "WIN"
+    else:
+        # Loss
+        pnl = -bet_size_usd
+        trade_result = "LOSS"
+    
+    st.session_state.cumulative_pnl += pnl
+    
+    trade = {
+        "timestamp": datetime.now(),
+        "predicted": outcome_predicted,
+        "actual": outcome_actual,
+        "confidence": confidence,
+        "bet_size": bet_size_usd,
+        "pnl": pnl,
+        "cumulative": st.session_state.cumulative_pnl,
+        "result": trade_result
+    }
+    st.session_state.trades.append(trade)
+    
+    # Keep only last 1000 trades for performance
+    if len(st.session_state.trades) > 1000:
+        st.session_state.trades = st.session_state.trades[-1000:]
+    
+    return pnl
+
+# Main metrics
+col1, col2, col3, col4 = st.columns(4)
+
+if st.session_state.trades:
+    df_trades = pd.DataFrame(st.session_state.trades)
+    
+    with col1:
+        st.metric("Total PnL", f"${st.session_state.cumulative_pnl:,.2f}", 
+                  delta=f"{st.session_state.cumulative_pnl/100:.1f}%" if st.session_state.cumulative_pnl != 0 else None)
+    
+    with col2:
+        win_rate = (df_trades[df_trades['result'] == 'WIN'].shape[0] / 
+                   df_trades[df_trades['result'] != 'SKIPPED'].shape[0]) if df_trades[df_trades['result'] != 'SKIPPED'].shape[0] > 0 else 0
+        st.metric("Win Rate", f"{win_rate:.1%}")
+    
+    with col3:
+        total_bets = df_trades[df_trades['result'] != 'SKIPPED'].shape[0]
+        st.metric("Total Bets", total_bets)
+    
+    with col4:
+        avg_confidence = df_trades['confidence'].mean()
+        st.metric("Avg Confidence", f"{avg_confidence:.1%}")
+    
+    # Equity curve
+    st.subheader("📈 Equity Curve")
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=df_trades['timestamp'],
+        y=df_trades['cumulative'],
+        mode='lines+markers',
+        name='Cumulative PnL',
+        line=dict(color='green', width=2),
+        marker=dict(size=4)
+    ))
+    fig.update_layout(
+        title="PnL Over Time",
+        xaxis_title="Trade Number",
+        yaxis_title="Cumulative PnL ($)",
+        hovermode='x unified'
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Recent trades
+    st.subheader("📋 Recent Trades")
+    st.dataframe(
+        df_trades.tail(20)[['timestamp', 'predicted', 'actual', 'confidence', 'pnl', 'result']].sort_values('timestamp', ascending=False),
+        use_container_width=True
+    )
+    
+    # PnL distribution
+    st.subheader("📊 PnL Distribution")
+    col_a, col_b = st.columns(2)
+    
+    with col_a:
+        fig_hist = px.histogram(df_trades[df_trades['result'] != 'SKIPPED'], x='pnl', nbins=30,
+                                title="Trade PnL Distribution")
+        fig_hist.update_layout(xaxis_title="PnL ($)", yaxis_title="Frequency")
+        st.plotly_chart(fig_hist, use_container_width=True)
+    
+    with col_b:
+        # Performance by predicted outcome
+        perf_by_outcome = df_trades[df_trades['result'] != 'SKIPPED'].groupby('predicted').agg({
+            'pnl': ['mean', 'sum', 'count']
+        }).round(2)
+        st.write("Performance by Prediction")
+        st.dataframe(perf_by_outcome)
+    
+    # Risk metrics
+    st.subheader("⚠️ Risk Metrics")
+    col_r1, col_r2, col_r3, col_r4 = st.columns(4)
+    
+    # Calculate Sharpe (simplified)
+    returns = df_trades[df_trades['result'] != 'SKIPPED']['pnl'].values
+    if len(returns) > 1:
+        sharpe = (returns.mean() / returns.std()) * (252**0.5) if returns.std() > 0 else 0
+        col_r1.metric("Sharpe Ratio", f"{sharpe:.2f}")
+    else:
+        col_r1.metric("Sharpe Ratio", "N/A")
+    
+    # Max drawdown
+    cumulative = df_trades['cumulative'].values
+    running_max = np.maximum.accumulate(cumulative)
+    drawdown = (running_max - cumulative) / running_max
+    max_dd = drawdown.max()
+    col_r2.metric("Max Drawdown", f"{max_dd:.1%}")
+    
+    # Profit factor
+    gross_profit = df_trades[df_trades['pnl'] > 0]['pnl'].sum()
+    gross_loss = abs(df_trades[df_trades['pnl'] < 0]['pnl'].sum())
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0
+    col_r3.metric("Profit Factor", f"{profit_factor:.2f}")
+    
+    # Average trade
+    avg_trade = df_trades[df_trades['result'] != 'SKIPPED']['pnl'].mean()
+    col_r4.metric("Avg Trade", f"${avg_trade:.2f}")
+    
+else:
+    st.info("No trades yet. Add outcomes in the 'Manual Input' page to see PnL.")
+    
+    # Demo button
+    if st.button("🎲 Demo Mode: Add Sample Data"):
+        # Add some demo trades
+        demo_outcomes = ['P1', 'P2', 'TIE', 'P1', 'P2', 'P1']
+        demo_preds = ['P1', 'P1', 'P1', 'P2', 'P2', 'P1']
+        demo_conf = [0.72, 0.68, 0.45, 0.81, 0.63, 0.77]
+        
+        for i in range(6):
+            add_trade(demo_preds[i], demo_outcomes[i], demo_conf[i], 100)
+        
+        st.rerun()
